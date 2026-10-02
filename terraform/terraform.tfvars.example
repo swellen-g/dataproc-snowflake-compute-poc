@@ -1,0 +1,14 @@
+# Example Terraform variable configuration
+project_id             = "gemini-in-bq-2" # Replace with target GCP Project ID
+region                 = "us-central1"
+zone                   = "us-central1-a"
+cluster_name           = "dataproc-benchmark-cluster"
+bucket_name            = "" # Leave blank to auto-create unique bucket
+bigquery_dataset_id    = "pyspark_benchmark_results"
+
+# Sizing for benchmark
+master_machine_type    = "e2-standard-4" # 4 vCPUs, 16 GB RAM
+worker_machine_type    = "n2-standard-4" # 4 vCPUs, 16 GB RAM
+num_primary_workers    = 2               # 2 on-demand nodes for baseline YARN stability
+num_secondary_workers  = 4               # 4 Spot nodes (60-80% discount on compute)
+
