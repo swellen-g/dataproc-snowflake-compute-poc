@@ -154,7 +154,6 @@ gcloud dataproc jobs submit pyspark \
 If your enterprise Snowflake deployment uses OAuth or a federated token flow, pass the token instead of a password:
 
 ```bash
-export SNOWFLAKE_AUTH_MODE="oauth"
 export SNOWFLAKE_OAUTH_TOKEN="YOUR_OAUTH_TOKEN"
 
 gcloud dataproc jobs submit pyspark \
