@@ -17,6 +17,7 @@ import datetime
 import os
 import sys
 import time
+from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -29,8 +30,12 @@ def parse_arguments():
 
     # Snowflake connection parameters
     parser.add_argument("--sf_url", default=os.getenv("SNOWFLAKE_URL"), help="Snowflake account URL (e.g. org-account.snowflakecomputing.com)")
-    parser.add_argument("--sf_user", default=os.getenv("SNOWFLAKE_USER"), help="Snowflake username")
+    parser.add_argument("--sf_user", default=os.getenv("SNOWFLAKE_USER"), help="Snowflake username or service user")
+    parser.add_argument("--sf_auth_mode", default=os.getenv("SNOWFLAKE_AUTH_MODE", "password"), choices=["password", "keypair", "oauth"], help="Snowflake authentication method for non-human / service accounts")
     parser.add_argument("--sf_password", default=os.getenv("SNOWFLAKE_PASSWORD"), help="Snowflake password (or set via SNOWFLAKE_PASSWORD env var)")
+    parser.add_argument("--sf_private_key_path", default=os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH"), help="Path to a Snowflake private key file used for key-pair auth")
+    parser.add_argument("--sf_private_key_passphrase", default=os.getenv("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE"), help="Optional passphrase for the private key used with key-pair auth")
+    parser.add_argument("--sf_oauth_token", default=os.getenv("SNOWFLAKE_OAUTH_TOKEN"), help="Snowflake OAuth access token for oauth auth mode")
     parser.add_argument("--sf_database", default=os.getenv("SNOWFLAKE_DATABASE"), help="Snowflake database name")
     parser.add_argument("--sf_schema", default=os.getenv("SNOWFLAKE_SCHEMA", "PUBLIC"), help="Snowflake schema name")
     parser.add_argument("--sf_warehouse", default=os.getenv("SNOWFLAKE_WAREHOUSE"), help="Snowflake warehouse (used briefly for stage read/write)")
@@ -67,12 +72,28 @@ def init_spark() -> SparkSession:
     return spark
 
 
+def _read_private_key_file(private_key_path: str) -> str:
+    """Read a Snowflake private key file from disk for key-pair auth."""
+    if not private_key_path:
+        raise ValueError("Private key path is required when using Snowflake key-pair auth.")
+
+    key_path = Path(private_key_path)
+    if not key_path.exists():
+        raise FileNotFoundError(f"Snowflake private key file not found: {private_key_path}")
+
+    return key_path.read_text(encoding="utf-8")
+
+
 def build_snowflake_options(args) -> dict:
-    """Construct Snowflake connector options dictionary."""
+    """Construct Snowflake connector options dictionary.
+
+    Supports both demo/password auth and enterprise service-user authentication via
+    key-pair or OAuth tokens.
+    """
     if not args.sf_url or not args.sf_user:
         raise ValueError(
-            "Missing required Snowflake parameters. Please supply --sf_url, --sf_user, "
-            "--sf_password (or SNOWFLAKE_PASSWORD env var), --sf_database, --sf_schema, and --sf_warehouse."
+            "Missing required Snowflake parameters. Please supply --sf_url and --sf_user, "
+            "plus the credentials required for the selected auth mode."
         )
 
     # Normalize sfURL (strip https:// if provided)
@@ -81,7 +102,6 @@ def build_snowflake_options(args) -> dict:
     sf_options = {
         "sfURL": sf_url,
         "sfUser": args.sf_user,
-        "sfPassword": args.sf_password or "",
         "sfDatabase": args.sf_database,
         "sfSchema": args.sf_schema,
         "sfWarehouse": args.sf_warehouse or "",
@@ -89,7 +109,35 @@ def build_snowflake_options(args) -> dict:
     if args.sf_role:
         sf_options["sfRole"] = args.sf_role
 
-    return sf_options
+    auth_mode = (args.sf_auth_mode or "password").lower()
+
+    if auth_mode == "password":
+        sf_options["sfPassword"] = args.sf_password or ""
+        return sf_options
+
+    if auth_mode == "keypair":
+        sf_options["sfAuthenticator"] = "SNOWFLAKE_JWT"
+        sf_options["sfPrivateKey"] = _read_private_key_file(
+            args.sf_private_key_path or os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH")
+        )
+        if args.sf_private_key_passphrase or os.getenv("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE"):
+            sf_options["sfPrivateKeyPassphrase"] = (
+                args.sf_private_key_passphrase or os.getenv("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
+            )
+        return sf_options
+
+    if auth_mode == "oauth":
+        token = args.sf_oauth_token or os.getenv("SNOWFLAKE_OAUTH_TOKEN")
+        if not token:
+            raise ValueError(
+                "Snowflake OAuth auth selected but no token was supplied. "
+                "Set --sf_oauth_token or SNOWFLAKE_OAUTH_TOKEN."
+            )
+        sf_options["sfAuthenticator"] = "OAUTH"
+        sf_options["sfToken"] = token
+        return sf_options
+
+    raise ValueError(f"Unsupported Snowflake auth mode: {auth_mode}")
 
 
 def read_source_data(spark: SparkSession, args) -> DataFrame:

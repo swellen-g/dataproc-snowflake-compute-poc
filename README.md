@@ -93,7 +93,11 @@ gcloud dataproc jobs submit pyspark \
 ```
 
 #### Option B: Live Snowflake Pipeline Run
-Connect directly to your Snowflake environment to read a table, run the transformation on Dataproc, and write the output back to Snowflake:
+Connect directly to your Snowflake environment to read a table, run the transformation on Dataproc, and write the output back to Snowflake.
+
+Use the auth method that matches your Snowflake environment. For enterprise workloads, a dedicated Snowflake service user is preferred over a human username/password.
+
+##### B1. Standard password auth (demo / quick validation)
 
 ```bash
 # 1. Set your Snowflake password securely in the environment
@@ -106,6 +110,7 @@ gcloud dataproc jobs submit pyspark \
   --region=us-central1 \
   --packages=net.snowflake:spark-snowflake_2.12:2.16.0-spark_3.4,net.snowflake:snowflake-jdbc:3.16.0 \
   -- \
+  --sf_auth_mode password \
   --sf_url "YOUR_ACCOUNT.snowflakecomputing.com" \
   --sf_user "YOUR_USERNAME" \
   --sf_database "YOUR_DATABASE" \
@@ -116,7 +121,66 @@ gcloud dataproc jobs submit pyspark \
   --write_mode "overwrite"
 ```
 
+##### B2. Enterprise key-pair auth (preferred for service users)
+
+For enterprise accounts, the Dataproc job should authenticate as a Snowflake service user rather than a personal login. Store the key securely (for example in Secret Manager or a mounted secret file) and provide the path at runtime.
+
+```bash
+export SNOWFLAKE_AUTH_MODE="keypair"
+export SNOWFLAKE_PRIVATE_KEY_PATH="/tmp/snowflake_service_user_key.p8"
+export SNOWFLAKE_ROLE="MY_ROLE"
+
+# Optional: if the key is encrypted with a passphrase
+# export SNOWFLAKE_PRIVATE_KEY_PASSPHRASE="..."
+
+gcloud dataproc jobs submit pyspark \
+  gs://YOUR_BUCKET_NAME/scripts/snowflake_dataproc_pipeline.py \
+  --cluster=dataproc-snowflake-poc \
+  --region=us-central1 \
+  --packages=net.snowflake:spark-snowflake_2.12:2.16.0-spark_3.4,net.snowflake:snowflake-jdbc:3.16.0 \
+  -- \
+  --sf_auth_mode keypair \
+  --sf_private_key_path "/tmp/snowflake_service_user_key.p8" \
+  --sf_url "YOUR_ACCOUNT.snowflakecomputing.com" \
+  --sf_user "svc_dataproc_user" \
+  --sf_database "YOUR_DATABASE" \
+  --sf_schema "PUBLIC" \
+  --sf_warehouse "YOUR_WAREHOUSE" \
+  --sf_role "MY_ROLE" \
+  --sf_source_table "YOUR_SOURCE_TABLE" \
+  --sf_target_table "YOUR_TARGET_TABLE" \
+  --write_mode "overwrite"
+```
+
+##### B3. OAuth / federated auth
+
+If your enterprise Snowflake deployment uses OAuth or a federated token flow, pass the token instead of a password:
+
+```bash
+export SNOWFLAKE_AUTH_MODE="oauth"
+export SNOWFLAKE_OAUTH_TOKEN="YOUR_OAUTH_TOKEN"
+
+gcloud dataproc jobs submit pyspark \
+  gs://YOUR_BUCKET_NAME/scripts/snowflake_dataproc_pipeline.py \
+  --cluster=dataproc-snowflake-poc \
+  --region=us-central1 \
+  --packages=net.snowflake:spark-snowflake_2.12:2.16.0-spark_3.4,net.snowflake:snowflake-jdbc:3.16.0 \
+  -- \
+  --sf_auth_mode oauth \
+  --sf_oauth_token "$SNOWFLAKE_OAUTH_TOKEN" \
+  --sf_url "YOUR_ACCOUNT.snowflakecomputing.com" \
+  --sf_user "svc_dataproc_user" \
+  --sf_database "YOUR_DATABASE" \
+  --sf_schema "PUBLIC" \
+  --sf_warehouse "YOUR_WAREHOUSE" \
+  --sf_source_table "YOUR_SOURCE_TABLE" \
+  --sf_target_table "YOUR_TARGET_TABLE" \
+  --write_mode "overwrite"
+```
+
 *Note: You can also specify `--sf_source_query "SELECT ... FROM ... WHERE ..."` instead of reading an entire table.*
+
+> Enterprise guidance: the Dataproc job authenticates to Snowflake as a Snowflake identity. In a production enterprise setup, that identity should usually be a dedicated service user or federated service principal, not a human username/password combination.
 
 ---
 
