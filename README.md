@@ -100,7 +100,7 @@ Use the auth method that matches your Snowflake environment. For enterprise work
 ##### B1. Standard password auth (demo / quick validation)
 
 ```bash
-# 1. Set your Snowflake password securely in the environment
+# 1. Set your Snowflake password in your local shell
 export SNOWFLAKE_PASSWORD="YOUR_SNOWFLAKE_PASSWORD"
 
 # 2. Submit the job with the official Snowflake Spark Connector packages
@@ -111,6 +111,7 @@ gcloud dataproc jobs submit pyspark \
   --packages=net.snowflake:spark-snowflake_2.12:2.16.0-spark_3.4,net.snowflake:snowflake-jdbc:3.16.0 \
   -- \
   --sf_auth_mode password \
+  --sf_password "$SNOWFLAKE_PASSWORD" \
   --sf_url "YOUR_ACCOUNT.snowflakecomputing.com" \
   --sf_user "YOUR_USERNAME" \
   --sf_database "YOUR_DATABASE" \
@@ -123,24 +124,18 @@ gcloud dataproc jobs submit pyspark \
 
 ##### B2. Enterprise key-pair auth (preferred for service users)
 
-For enterprise accounts, the Dataproc job should authenticate as a Snowflake service user rather than a personal login. Store the key securely (for example in Secret Manager or a mounted secret file) and provide the path at runtime.
+For enterprise accounts, the Dataproc job authenticates as a Snowflake service user using a PKCS#8 private key (`.p8`). Credentials do **not** need to be stored permanently in GCP: passing `--files` stages the key file ephemerally for the single job execution, and the pipeline automatically formats the key into `pem_private_key` (and decrypts it in-memory if a passphrase is provided).
 
 ```bash
-export SNOWFLAKE_AUTH_MODE="keypair"
-export SNOWFLAKE_PRIVATE_KEY_PATH="/tmp/snowflake_service_user_key.p8"
-export SNOWFLAKE_ROLE="MY_ROLE"
-
-# Optional: if the key is encrypted with a passphrase
-# export SNOWFLAKE_PRIVATE_KEY_PASSPHRASE="..."
-
 gcloud dataproc jobs submit pyspark \
   gs://YOUR_BUCKET_NAME/scripts/snowflake_dataproc_pipeline.py \
   --cluster=dataproc-snowflake-poc \
   --region=us-central1 \
   --packages=net.snowflake:spark-snowflake_2.12:2.16.0-spark_3.4,net.snowflake:snowflake-jdbc:3.16.0 \
+  --files="/tmp/snowflake_service_user_key.p8" \
   -- \
   --sf_auth_mode keypair \
-  --sf_private_key_path "/tmp/snowflake_service_user_key.p8" \
+  --sf_private_key_path "snowflake_service_user_key.p8" \
   --sf_url "YOUR_ACCOUNT.snowflakecomputing.com" \
   --sf_user "svc_dataproc_user" \
   --sf_database "YOUR_DATABASE" \
@@ -151,6 +146,8 @@ gcloud dataproc jobs submit pyspark \
   --sf_target_table "YOUR_TARGET_TABLE" \
   --write_mode "overwrite"
 ```
+
+*(Optional: if your `.p8` key is encrypted with a passphrase, append `--sf_private_key_passphrase "$SNOWFLAKE_PRIVATE_KEY_PASSPHRASE"` after `--`.)*
 
 ##### B3. OAuth / federated auth
 

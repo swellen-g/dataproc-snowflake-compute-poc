@@ -10,9 +10,12 @@ __pycache__/
 .terraform.lock.hcl
 *.tfvars
 
-# Environments & IDEs
+# Environments, Keys & IDEs
+*.p8
+*.pem
 .env
 .venv/
 .idea/
 .vscode/
 *.DS_Store
+

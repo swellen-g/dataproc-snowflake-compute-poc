@@ -33,7 +33,8 @@ def parse_arguments():
     parser.add_argument("--sf_user", default=os.getenv("SNOWFLAKE_USER"), help="Snowflake username or service user")
     parser.add_argument("--sf_auth_mode", default=os.getenv("SNOWFLAKE_AUTH_MODE", "password"), choices=["password", "keypair", "oauth"], help="Snowflake authentication method for non-human / service accounts")
     parser.add_argument("--sf_password", default=os.getenv("SNOWFLAKE_PASSWORD"), help="Snowflake password (or set via SNOWFLAKE_PASSWORD env var)")
-    parser.add_argument("--sf_private_key_path", default=os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH"), help="Path to a Snowflake private key file used for key-pair auth")
+    parser.add_argument("--sf_private_key_path", default=os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH"), help="Path to a Snowflake private key file (.p8) used for key-pair auth")
+    parser.add_argument("--sf_private_key", default=os.getenv("SNOWFLAKE_PRIVATE_KEY"), help="Inline PEM/base64 private key string for key-pair auth")
     parser.add_argument("--sf_private_key_passphrase", default=os.getenv("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE"), help="Optional passphrase for the private key used with key-pair auth")
     parser.add_argument("--sf_oauth_token", default=os.getenv("SNOWFLAKE_OAUTH_TOKEN"), help="Snowflake OAuth access token for oauth auth mode")
     parser.add_argument("--sf_database", default=os.getenv("SNOWFLAKE_DATABASE"), help="Snowflake database name")
@@ -72,16 +73,53 @@ def init_spark() -> SparkSession:
     return spark
 
 
-def _read_private_key_file(private_key_path: str) -> str:
-    """Read a Snowflake private key file from disk for key-pair auth."""
-    if not private_key_path:
-        raise ValueError("Private key path is required when using Snowflake key-pair auth.")
+def _load_pem_private_key_body(private_key_path: str | None, private_key_raw: str | None = None, passphrase: str | None = None) -> str:
+    """Load a Snowflake PKCS#8 private key and return the base64 body expected by spark-snowflake's pem_private_key option."""
+    pem_text = private_key_raw
+    if not pem_text:
+        if not private_key_path:
+            raise ValueError(
+                "Private key is required when using Snowflake key-pair auth. "
+                "Provide --sf_private_key_path (with --files on gcloud dataproc) or --sf_private_key."
+            )
 
-    key_path = Path(private_key_path)
-    if not key_path.exists():
-        raise FileNotFoundError(f"Snowflake private key file not found: {private_key_path}")
+        candidates = [Path(private_key_path), Path(private_key_path).name and Path(Path(private_key_path).name)]
+        try:
+            from pyspark import SparkFiles
+            candidates.append(Path(SparkFiles.get(Path(private_key_path).name)))
+        except Exception:
+            pass
 
-    return key_path.read_text(encoding="utf-8")
+        resolved_path = next((p for p in candidates if p and p.exists()), None)
+        if not resolved_path:
+            raise FileNotFoundError(
+                f"Snowflake private key file not found: {private_key_path}. "
+                "When submitting via 'gcloud dataproc jobs submit pyspark', pass '--files=/path/to/key.p8'."
+            )
+        pem_text = resolved_path.read_text(encoding="utf-8")
+
+    pem_text = pem_text.strip()
+
+    # If the private key is encrypted or a passphrase is provided, decrypt it in-memory to unencrypted PKCS#8 PEM
+    if "ENCRYPTED" in pem_text or passphrase:
+        from cryptography.hazmat.primitives import serialization
+        private_key_obj = serialization.load_pem_private_key(
+            pem_text.encode("utf-8"),
+            password=passphrase.encode("utf-8") if passphrase else None,
+        )
+        pem_text = private_key_obj.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode("utf-8")
+
+    # spark-snowflake's 'pem_private_key' expects the base64-encoded PKCS#8 body without header/footer or newlines
+    lines = [
+        line.strip()
+        for line in pem_text.splitlines()
+        if line.strip() and not line.strip().startswith("-----BEGIN") and not line.strip().startswith("-----END")
+    ]
+    return "".join(lines)
 
 
 def build_snowflake_options(args) -> dict:
@@ -112,18 +150,16 @@ def build_snowflake_options(args) -> dict:
     auth_mode = (args.sf_auth_mode or "password").lower()
 
     if auth_mode == "password":
-        sf_options["sfPassword"] = args.sf_password or ""
+        sf_options["sfPassword"] = args.sf_password or os.getenv("SNOWFLAKE_PASSWORD") or ""
         return sf_options
 
     if auth_mode == "keypair":
-        sf_options["sfAuthenticator"] = "SNOWFLAKE_JWT"
-        sf_options["sfPrivateKey"] = _read_private_key_file(
-            args.sf_private_key_path or os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH")
+        passphrase = args.sf_private_key_passphrase or os.getenv("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
+        sf_options["pem_private_key"] = _load_pem_private_key_body(
+            private_key_path=args.sf_private_key_path or os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH"),
+            private_key_raw=getattr(args, "sf_private_key", None) or os.getenv("SNOWFLAKE_PRIVATE_KEY"),
+            passphrase=passphrase,
         )
-        if args.sf_private_key_passphrase or os.getenv("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE"):
-            sf_options["sfPrivateKeyPassphrase"] = (
-                args.sf_private_key_passphrase or os.getenv("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
-            )
         return sf_options
 
     if auth_mode == "oauth":
